@@ -1,0 +1,46 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Moviex multiplayer test</title>
+<style>body{font-family:sans-serif;background:#10162a;color:#fff;margin:0;padding:10px}input,button{font-size:15px;padding:6px}canvas{background:#1b2547;display:block;margin-top:10px;max-width:100%;border:1px solid #556}#log{font-size:12px;opacity:.8;margin-top:6px}</style>
+<h3>Moviex multiplayer test</h3>
+<div>Server: <input id="host" size="34" value=""> Room: <input id="room" size="8" value="plains"> Name: <input id="name" size="8">
+<button id="go">Connect</button></div>
+<div id="log">Not connected. Open this page in two browser tabs to see two players.</div>
+<canvas id="cv" width="640" height="420"></canvas>
+<script>
+var ws, myId, others = {}, me = { x: 0, z: 0, ry: 0 }, keys = {};
+var $ = function (i) { return document.getElementById(i); }; $('host').value = location.host; $('name').value = 'P' + Math.floor(Math.random() * 900 + 100);
+function log(s) { $('log').textContent = s; }
+$('go').onclick = function () {
+  if (ws) ws.close(); others = {};
+  var h = $('host').value.trim(), secure = location.protocol === 'https:';
+  ws = new WebSocket((secure ? 'wss://' : 'ws://') + h + '/ws/' + encodeURIComponent($('room').value));
+  ws.onopen = function () { log('Connected! Move with WASD / arrow keys.'); };
+  ws.onclose = function () { log('Disconnected.'); };
+  ws.onerror = function () { log('Connection error - check the server address.'); };
+  ws.onmessage = function (e) {
+    var m = JSON.parse(e.data);
+    if (m.t === 'welcome') { myId = m.id; others = m.players || {}; delete others[myId]; }
+    else if (m.t === 's' || m.t === 'join') { others[m.id] = m; }
+    else if (m.t === 'left') { delete others[m.id]; }
+    else if (m.t === 'chat') { log(m.name + ': ' + m.text); }
+  };
+};
+addEventListener('keydown', function (e) { keys[e.key.toLowerCase()] = 1; }); addEventListener('keyup', function (e) { keys[e.key.toLowerCase()] = 0; });
+setInterval(function () {                       // move + send our state 10x per second
+  var dx = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0), dz = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+  if (tgt && !dx && !dz) { var ex = tgt.x - me.x, ez = tgt.z - me.z, el = Math.hypot(ex, ez); if (el > 0.7) { dx = ex / el; dz = ez / el; } }
+  me.x += dx * 0.6; me.z += dz * 0.6; if (dx || dz) me.ry = Math.atan2(dx, dz);
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'state', name: $('name').value, lvl: 1, x: me.x, z: me.z, ry: me.ry, hp: 100, maxHp: 100 }));
+}, 100);
+var cv = $('cv'), c = cv.getContext('2d'), tgt = null;
+function setTgt(e) { var r = cv.getBoundingClientRect(); tgt = { x: ((e.clientX - r.left) / r.width * cv.width - cv.width / 2) / 8, z: ((e.clientY - r.top) / r.height * cv.height - cv.height / 2) / 8 }; }
+cv.addEventListener('pointerdown', setTgt); cv.addEventListener('pointermove', function (e) { if (e.buttons || e.pointerType === 'touch') setTgt(e); });
+cv.style.touchAction = 'none'; $('log').textContent += ' On a phone: tap or drag on the canvas to walk there.';
+(function draw() {
+  c.clearRect(0, 0, cv.width, cv.height);
+  function dot(x, z, col, name) { var px = cv.width / 2 + x * 8, py = cv.height / 2 + z * 8; c.fillStyle = col; c.beginPath(); c.arc(px, py, 9, 0, 7); c.fill(); c.fillStyle = '#fff'; c.font = '12px sans-serif'; c.textAlign = 'center'; c.fillText(name, px, py - 14); }
+  for (var id in others) dot(others[id].x, others[id].z, '#ff8a4a', others[id].name);
+  dot(me.x, me.z, '#6dff8f', $('name').value + ' (you)');
+  requestAnimationFrame(draw);
+})();
+</script>
