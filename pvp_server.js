@@ -70,8 +70,35 @@ const PARTY_MAX = 5, GUILD_MAX = 30, GFILE = path.join(process.env.DATA_DIR || _
 const parties = new Map(); let nextParty = 1;
 const guilds = new Map(), userGuild = new Map(); let nextGuild = 1;
 try { const j = JSON.parse(fs.readFileSync(GFILE, 'utf8')); (j.guilds || []).forEach(function (g) { g.members = new Map(Object.entries(g.members || {})); guilds.set(g.id, g); g.members.forEach(function (m, u) { userGuild.set(u, g.id); }); nextGuild = Math.max(nextGuild, g.id + 1); }); } catch (e) {}
-let saveTimer = null;
-function saveGuilds() { clearTimeout(saveTimer); saveTimer = setTimeout(function () { try { const out = { guilds: Array.from(guilds.values()).map(function (g) { return Object.assign({}, g, { members: Object.fromEntries(g.members) }); }) }; fs.writeFileSync(GFILE, JSON.stringify(out)); } catch (e) {} }, 500); }
+/* ---- persistence: Firebase Realtime Database (REST) + local file fallback ----
+   env FIREBASE_DB_URL (default = the game's database), FIREBASE_SECRET (database secret, needed if your rules are not public for /moviex_guilds) */
+const FB_URL = String(process.env.FIREBASE_DB_URL || 'https://html-codes-encrytper.firebaseio.com').replace(/\/+$/, ''), FB_SECRET = process.env.FIREBASE_SECRET || '', FB_PATH = '/moviex_guilds.json';
+let fbLoaded = false, saveTimer = null, fbDirty = false;
+function fbReq(method, body, cb) {
+  let u; try { u = new URL(FB_URL + FB_PATH + (FB_SECRET ? '?auth=' + encodeURIComponent(FB_SECRET) : '')); } catch (e) { return cb(e); }
+  const mod = u.protocol === 'http:' ? http : require('https'), data = body === undefined ? null : JSON.stringify(body);
+  const rq = mod.request(u, { method: method, headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}, timeout: 10000 }, function (rs) {
+    let buf = ''; rs.on('data', function (d) { buf += d; }); rs.on('end', function () { if (rs.statusCode >= 200 && rs.statusCode < 300) { try { cb(null, buf ? JSON.parse(buf) : null); } catch (e) { cb(e); } } else cb(new Error('HTTP ' + rs.statusCode + ' ' + buf.slice(0, 120))); });
+  });
+  rq.on('error', cb); rq.on('timeout', function () { rq.destroy(new Error('timeout')); }); if (data) rq.write(data); rq.end();
+}
+function packGuilds() { const out = {}; guilds.forEach(function (g) { out[g.id] = Object.assign({}, g, { members: Object.fromEntries(g.members) }); }); return out; }
+function loadFromObj(obj) { Object.values(obj || {}).forEach(function (g) { if (!g || !g.id || guilds.has(g.id)) return; g.members = new Map(Object.entries(g.members || {})); if (!g.members.size) return; guilds.set(g.id, g); g.members.forEach(function (mm, u) { userGuild.set(u, g.id); }); nextGuild = Math.max(nextGuild, g.id + 1); }); }
+function fbLoad() {
+  fbReq('GET', undefined, function (err, data) {
+    if (err) { console.log('[guilds] Firebase load failed (' + err.message + '), retrying in 30s'); setTimeout(fbLoad, 30000); return; }
+    loadFromObj(data); fbLoaded = true; console.log('[guilds] loaded from Firebase: ' + guilds.size + ' guild(s)'); if (fbDirty) saveGuilds();
+  });
+}
+function saveGuilds() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(function () {
+    try { fs.writeFileSync(GFILE, JSON.stringify({ guilds: Array.from(guilds.values()).map(function (g) { return Object.assign({}, g, { members: Object.fromEntries(g.members) }); }) })); } catch (e) {}
+    if (!fbLoaded) { fbDirty = true; return; }
+    fbReq('PUT', packGuilds(), function (err) { if (err) console.log('[guilds] Firebase save failed: ' + err.message); });
+  }, 800);
+}
+fbLoad();
 function say(c, msg) { send(c, { t: 'sm', msg: msg }); }
 function clean(sx, n) { return String(sx || '').replace(/[<>&]/g, '').trim().slice(0, n); }
 /* ---- party ---- */
@@ -133,7 +160,9 @@ function social(c, m) {
   if (t === 'pc') { const pa = parties.get(c.party); if (pa && rate(c.chat || (c.chat = []), 3)) partySend(pa, { t: 'pc', n: c.name, msg: clean(m.msg, 120) }); return true; }
   if (t === 'px') {                                               // a party member killed a mob: share EXP with members nearby
     const pa = parties.get(c.party); if (!pa || !rate(c.pxr || (c.pxr = []), 20)) return true;
-    partyMembers(pa).forEach(function (x) { if (x === c || x.room !== c.room) return; if (c.room.indexOf('x_') !== 0 && Math.hypot(x.x - c.x, x.z - c.z) > 70) return; send(x, { t: 'px', tl: num(m.tl, 1, 999, 1), tx: num(m.tx, 0, 1e9, 0), fx: m.fx ? 1 : 0 }); });
+    const base = num(m.x, 0, 5e6, 0); if (base <= 0) return true;
+    const near = partyMembers(pa).filter(function (x) { return x === c || (x.room === c.room && (c.room.indexOf('x_') === 0 || Math.hypot(x.x - c.x, x.z - c.z) <= 80)); });
+    const share = Math.floor(base / near.length); near.forEach(function (x) { send(x, { t: 'px', x: share, n: near.length }); });
     return true;
   }
   /* ---- guild ---- */
