@@ -72,7 +72,7 @@ const guilds = new Map(), userGuild = new Map(); let nextGuild = 1;
 try { const j = JSON.parse(fs.readFileSync(GFILE, 'utf8')); (j.guilds || []).forEach(function (g) { g.members = new Map(Object.entries(g.members || {})); guilds.set(g.id, g); g.members.forEach(function (m, u) { userGuild.set(u, g.id); }); nextGuild = Math.max(nextGuild, g.id + 1); }); } catch (e) {}
 /* ---- persistence: Firebase Realtime Database (REST) + local file fallback ----
    env FIREBASE_DB_URL (default = the game's database), FIREBASE_SECRET (database secret, needed if your rules are not public for /moviex_guilds) */
-const FB_URL = String(process.env.FIREBASE_DB_URL || 'https://html-codes-encrytper.firebaseio.com').replace(/\/+$/, ''), FB_SECRET = process.env.FIREBASE_SECRET || '', FB_PATH = '/moviex_guilds.json';
+const FB_URL = String(process.env.FIREBASE_DB_URL || 'https://html-codes-encrytper.firebaseio.com').replace(/\/+$/, ''), FB_SECRET = process.env.FIREBASE_SECRET || 'c7zcqlxVa6dsEJldwExNgR9T0hWZIhBvlKNZxxh2', FB_PATH = '/moviex_guilds.json';
 let fbLoaded = false, saveTimer = null, fbDirty = false;
 function fbReq(method, body, cb) {
   let u; try { u = new URL(FB_URL + FB_PATH + (FB_SECRET ? '?auth=' + encodeURIComponent(FB_SECRET) : '')); } catch (e) { return cb(e); }
