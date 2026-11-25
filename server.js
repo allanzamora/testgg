@@ -70,8 +70,7 @@ const PARTY_MAX = 5, GUILD_MAX = 30, GFILE = path.join(process.env.DATA_DIR || _
 const parties = new Map(); let nextParty = 1;
 const guilds = new Map(), userGuild = new Map(); let nextGuild = 1;
 try { const j = JSON.parse(fs.readFileSync(GFILE, 'utf8')); (j.guilds || []).forEach(function (g) { g.members = new Map(Object.entries(g.members || {})); guilds.set(g.id, g); g.members.forEach(function (m, u) { userGuild.set(u, g.id); }); nextGuild = Math.max(nextGuild, g.id + 1); }); } catch (e) {}
-/* ---- persistence: Firebase Realtime Database (REST) + local file fallback ----
-   env FIREBASE_DB_URL (default = the game's database), FIREBASE_SECRET (database secret, needed if your rules are not public for /moviex_guilds) */
+
 const FB_URL = String(process.env.FIREBASE_DB_URL || 'https://html-codes-encrytper.firebaseio.com').replace(/\/+$/, ''), FB_SECRET = process.env.FIREBASE_SECRET || 'c7zcqlxVa6dsEJldwExNgR9T0hWZIhBvlKNZxxh2', FB_PATH = '/moviex_guilds.json';
 let fbLoaded = false, saveTimer = null, fbDirty = false;
 function fbReq(method, body, cb) {
@@ -165,6 +164,18 @@ function social(c, m) {
     const share = Math.floor(base / near.length); near.forEach(function (x) { send(x, { t: 'px', x: share, n: near.length }); });
     return true;
   }
+  if (t === 'ch') {                                               // chat: world / map / whisper (guild chat is 'gc')
+    if (!rate(c.chr || (c.chr = []), 2)) { say(c, 'You are chatting too fast.'); return true; }
+    const msg = clean(m.msg, 120); if (!msg) return true; const ch = m.c;
+    if (ch === 'world') { if (Date.now() - (c.lastWorld || 0) < 3000) { say(c, 'World chat cooldown: 3 seconds.'); return true; } c.lastWorld = Date.now(); const o = { t: 'ch', c: 'world', n: c.name, msg: msg }; clients.forEach(function (x) { if (x.joined && x.open) send(x, o); }); }
+    else if (ch === 'map') { const o = { t: 'ch', c: 'map', n: c.name, msg: msg }; clients.forEach(function (x) { if (x.joined && x.open && x.room === c.room) send(x, o); }); }
+    else if (ch === 'priv') {
+      const nm = clean(m.to, 20).toLowerCase(); let v = null; clients.forEach(function (x) { if (x.joined && x.open && x.name.toLowerCase() === nm) v = x; });
+      if (!v) { say(c, 'Player "' + clean(m.to, 20) + '" is not online.'); return true; }
+      send(v, { t: 'ch', c: 'priv', n: c.name, msg: msg }); send(c, { t: 'ch', c: 'priv', n: c.name, to: v.name, msg: msg, me: 1 });
+    }
+    return true;
+  }
   /* ---- guild ---- */
   if (t[0] !== 'g' || t === 'gok') return false;
   if (!c.uid) { say(c, 'Guild needs a logged-in account id.'); return true; }
@@ -216,7 +227,7 @@ function onMessage(c, txt) {
   if (m.t === 'p') { send(c, { t: 'p', ts: m.ts, n: c.joined ? inRoom(c.room).length : clients.size }); return; }
   if ((m.t === 'join' && !c.joined) || (m.t === 'map' && c.joined)) {   // join a map room (or switch rooms when the player travels)
     const room = roomOf(m), was = c.joined ? c.room : null;
-    if (was === room) { if (c.joined) send(c, { t: 'w', v: 3, dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top() }); return; }   // same map reloaded: resend who is here
+    if (was === room) { if (c.joined) send(c, { t: 'w', v: 4, dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top() }); return; }   // same map reloaded: resend who is here
     if (inRoom(room).filter(function (x) { return x !== c; }).length >= MAX_PLAYERS) { send(c, { t: 'full' }); if (!c.joined) c.sock.end(); return; }
     if (was !== null) broadcast({ t: 'l', id: c.id }, c, was);
     c.room = room;
@@ -224,7 +235,7 @@ function onMessage(c, txt) {
     if (m.uid) c.uid = String(m.uid).replace(/[^A-Za-z0-9_\-]/g, '').slice(0, 64);
     c.look = small(m.look); c.eq = small(m.eq); c.cw = small(m.cw); c.mh = num(m.mh, 1, 1e9, 100); c.hp = c.mh;
     const a = Math.random() * Math.PI * 2, r = room === PVP_ROOM ? 14 + Math.random() * 38 : 4 + Math.random() * 10; c.x = Math.cos(a) * r; c.z = Math.sin(a) * r; c.joined = true;
-    send(c, { t: 'w', v: 3, dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top() });
+    send(c, { t: 'w', v: 4, dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top() });
     broadcast({ t: 'j', p: pub(c) }, c, room);
     try { socialJoined(c, was === null); } catch (e) {} return;
   }
