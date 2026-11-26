@@ -10,7 +10,7 @@ const server = http.createServer(function (req, res) {
   res.end('RanCraft PvP server OK - players online: ' + clients.size + '\n');
 });
 
-/* ---------- minimal RFC 6455 WebSocket ---------- */
+
 function frame(str) {
   const p = Buffer.from(str), n = p.length; let h;
   if (n < 126) h = Buffer.from([0x81, n]); else if (n < 65536) h = Buffer.from([0x81, 126, n >> 8, n & 255]);
@@ -58,11 +58,17 @@ function num(v, lo, hi, d) { v = +v; return isFinite(v) ? Math.min(hi, Math.max(
 function rate(arr, perSec) { const now = Date.now(); while (arr.length && now - arr[0] > 1000) arr.shift(); if (arr.length >= perSec) return false; arr.push(now); return true; }
 function pub(c) { return { id: c.id, name: c.name, lvl: c.lvl, look: c.look, eq: c.eq, cw: c.cw, x: c.x, z: c.z, ry: c.ry, hp: c.hp, mh: c.mh, k: c.kills, d: c.deaths }; }
 const roomDead = new Map();   // room -> Map(mobId -> respawn-at ms): shared mob kills so everyone in a map sees the same mobs
+const roomLoot = new Map();   // room -> Map(lid -> {lid,it,x,z,at}) items dropped by dead players (first come, first served)
+let lootSeq = 0; const LOOT_MS = 180000;
+function lootList(room) { const m = roomLoot.get(room), now = Date.now(), out = []; if (m) m.forEach(function (l, k) { if (now - l.at > LOOT_MS) m.delete(k); else out.push({ lid: l.lid, it: l.it, x: l.x, z: l.z }); }); return out; }
+function lootItem(it) { if (!it || typeof it.b !== 'string') return null; const r = (Array.isArray(it.r) ? it.r : []).slice(0, 12).filter(function (q) { return Array.isArray(q) && /^[a-z]{2,8}$/.test(String(q[0])) && isFinite(q[1]); }).map(function (q) { return [String(q[0]), +q[1]]; }); return { b: it.b.replace(/[^A-Za-z0-9_~-]/g, '').slice(0, 40), r: r, u: Math.max(0, Math.min(200, it.u | 0)), s: Math.max(0, Math.min(5, it.s | 0)), m: Math.max(1, Math.min(1024, it.m | 0)) }; }
+setInterval(function () { const now = Date.now(); roomLoot.forEach(function (m, room) { m.forEach(function (l, k) { if (now - l.at > LOOT_MS) { m.delete(k); broadcast({ t: 'lx', lid: k }, undefined, room); } }); }); }, 15000);
 function deadList(room) { const d = roomDead.get(room), now = Date.now(), out = []; if (d) d.forEach(function (at, k) { if (at <= now) d.delete(k); else out.push([k, Math.round((at - now) / 1000)]); }); return out; }
 function inRoom(room) { return Array.from(clients.values()).filter(function (c) { return c.joined && c.open && c.room === room; }); }
 function roomOf(m) { const r = String((m && m.map) || PVP_ROOM).replace(/[^A-Za-z0-9_]/g, '').slice(0, 24); return r || PVP_ROOM; }
-function lim(c) { return c.room === PVP_ROOM ? ARENA_R : WORLD_LIM; }
-function top() { return inRoom(PVP_ROOM).sort(function (a, b) { return b.kills - a.kills || a.deaths - b.deaths; }).slice(0, 5).map(function (c) { return [c.name, c.kills, c.deaths]; }); }
+function isArena(room) { return /^pvp[2-5]?$/.test(room); }
+function lim(c) { return isArena(c.room) ? ARENA_R : WORLD_LIM; }
+function top(room) { return inRoom(room || PVP_ROOM).sort(function (a, b) { return b.kills - a.kills || a.deaths - b.deaths; }).slice(0, 5).map(function (c) { return [c.name, c.kills, c.deaths]; }); }
 function small(o) { try { const s = JSON.stringify(o); return s.length < 3000 ? o : {}; } catch (e) { return {}; } }
 
 /* ====================== PARTY + GUILD ====================== */
@@ -73,8 +79,8 @@ try { const j = JSON.parse(fs.readFileSync(GFILE, 'utf8')); (j.guilds || []).for
 
 const FB_URL = String(process.env.FIREBASE_DB_URL || 'https://html-codes-encrytper.firebaseio.com').replace(/\/+$/, ''), FB_SECRET = process.env.FIREBASE_SECRET || 'c7zcqlxVa6dsEJldwExNgR9T0hWZIhBvlKNZxxh2', FB_PATH = '/moviex_guilds.json';
 let fbLoaded = false, saveTimer = null, fbDirty = false;
-function fbReq(method, body, cb) {
-  let u; try { u = new URL(FB_URL + FB_PATH + (FB_SECRET ? '?auth=' + encodeURIComponent(FB_SECRET) : '')); } catch (e) { return cb(e); }
+function fbReq(method, body, cb, pth) {
+  let u; try { u = new URL(FB_URL + (pth || FB_PATH) + (FB_SECRET ? '?auth=' + encodeURIComponent(FB_SECRET) : '')); } catch (e) { return cb(e); }
   const mod = u.protocol === 'http:' ? http : require('https'), data = body === undefined ? null : JSON.stringify(body);
   const rq = mod.request(u, { method: method, headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}, timeout: 10000 }, function (rs) {
     let buf = ''; rs.on('data', function (d) { buf += d; }); rs.on('end', function () { if (rs.statusCode >= 200 && rs.statusCode < 300) { try { cb(null, buf ? JSON.parse(buf) : null); } catch (e) { cb(e); } } else cb(new Error('HTTP ' + rs.statusCode + ' ' + buf.slice(0, 120))); });
@@ -134,8 +140,63 @@ function socialJoined(c, first) {
   else send(c, { t: 'gok', g: null });
 }
 function socialDrop(c) { if (c.party) partyLeave(c, 'offline'); }
+
+/* ====================== MARKET PLACE ====================== */
+const MK_PATH = '/moviex_market.json', MK_MAX_USER = 20, MK_MAX = 4000, MK_SLOTS = ['weapon', 'helmet', 'armor', 'pants', 'gloves', 'wings', 'necklace', 'ringL', 'ringR'];
+const market = new Map(), mkEarn = new Map(); let nextMk = 1, mkLoaded = false, mkDirty = false, mkTimer = null;
+function mkPack() { const l = {}, e = {}; market.forEach(function (x, k) { l[k] = x; }); mkEarn.forEach(function (x, k) { if (x.g || x.d) e[k] = x; }); return { listings: l, earn: e, next: nextMk }; }
+function mkFromObj(o) { o = o || {}; Object.values(o.listings || {}).forEach(function (x) { if (x && x.id && !market.has(x.id)) market.set(x.id, x); }); Object.keys(o.earn || {}).forEach(function (u) { if (!mkEarn.has(u)) mkEarn.set(u, { g: o.earn[u].g | 0, d: o.earn[u].d | 0 }); }); nextMk = Math.max(nextMk, o.next | 0, 1); }
+try { mkFromObj(JSON.parse(fs.readFileSync(path.join(process.env.DATA_DIR || __dirname, 'market.json'), 'utf8'))); } catch (e) {}
+function mkLoad() { fbReq('GET', undefined, function (err, data) { if (err) { console.log('[market] Firebase load failed (' + err.message + '), retrying in 30s'); setTimeout(mkLoad, 30000); return; } mkFromObj(data); mkLoaded = true; console.log('[market] loaded: ' + market.size + ' listing(s)'); if (mkDirty) mkSave(); }, MK_PATH); }
+function mkSave() {
+  clearTimeout(mkTimer);
+  mkTimer = setTimeout(function () {
+    try { fs.writeFileSync(path.join(process.env.DATA_DIR || __dirname, 'market.json'), JSON.stringify(mkPack())); } catch (e) {}
+    if (!mkLoaded) { mkDirty = true; return; }
+    fbReq('PUT', mkPack(), function (err) { if (err) console.log('[market] Firebase save failed: ' + err.message); }, MK_PATH);
+  }, 600);
+}
+mkLoad();
+function mkView(x) { return { id: x.id, sn: x.sn, slot: x.slot, it: x.it, p: x.p, cur: x.cur }; }
+function mkMine(c) { const l = []; market.forEach(function (x) { if (x.uid === c.uid) l.push(mkView(x)); }); const e = mkEarn.get(c.uid) || { g: 0, d: 0 }; send(c, { t: 'mxmine', l: l, e: { g: e.g, d: e.d } }); }
+function mkHandle(c, m) {
+  const t = m.t; if (!c.uid) { send(c, { t: 'mxo', ok: 0, msg: 'Market needs a logged-in account id.' }); return true; }
+  if (!rate(c.mxr || (c.mxr = []), 8)) return true;
+  if (t === 'mxl') {
+    const cur = m.cur === 'd' ? 'd' : 'g', slot = String(m.slot || ''), out = [];
+    market.forEach(function (x) { if (x.cur === cur && x.slot === slot) out.push(x); });
+    out.sort(function (a, b) { return m.sort === 'lo' ? a.p - b.p : b.p - a.p; });
+    send(c, { t: 'mxl', cur: cur, slot: slot, n: out.length, l: out.slice(0, 60).map(mkView) }); return true;
+  }
+  if (t === 'mxs') {
+    const it = lootItem(m.it), cur = m.cur === 'd' ? 'd' : 'g', p = Math.floor(+m.p), slot = String(m.slot || '');
+    if (!it || MK_SLOTS.indexOf(slot) < 0 || !(p >= 1) || p > (cur === 'd' ? 1000000 : 2000000000)) { send(c, { t: 'mxo', ok: 0, msg: 'Invalid listing.' }); return true; }
+    let mine = 0; market.forEach(function (x) { if (x.uid === c.uid) mine++; });
+    if (mine >= MK_MAX_USER) { send(c, { t: 'mxo', ok: 0, msg: 'You can list at most ' + MK_MAX_USER + ' items.' }); return true; }
+    if (market.size >= MK_MAX) { send(c, { t: 'mxo', ok: 0, msg: 'The market is full.' }); return true; }
+    const x = { id: 'M' + (nextMk++), uid: c.uid, sn: c.name, slot: slot, it: it, p: p, cur: cur, at: Date.now() };
+    market.set(x.id, x); mkSave(); send(c, { t: 'mxo', ok: 1, id: x.id, msg: 'Item listed.', tok: String(m.tok || '') }); return true;
+  }
+  if (t === 'mxb') {
+    const x = market.get(String(m.id));
+    if (!x) { send(c, { t: 'mxbk', ok: 0, msg: 'That item was already sold or removed.' }); return true; }
+    if (x.uid === c.uid) { send(c, { t: 'mxbk', ok: 0, msg: 'You cannot buy your own item.' }); return true; }
+    market.delete(x.id); const e = mkEarn.get(x.uid) || { g: 0, d: 0 }; e[x.cur] += x.p; mkEarn.set(x.uid, e); mkSave();
+    send(c, { t: 'mxbk', ok: 1, it: x.it, p: x.p, cur: x.cur, id: x.id, slot: x.slot, sn: x.sn });
+    clients.forEach(function (o) { if (o.uid === x.uid && o.open && o.joined) send(o, { t: 'mxe', msg: c.name + ' bought your item for ' + x.p + (x.cur === 'd' ? ' diamonds' : ' gold') + '. Collect it at the Market Place.' }); });
+    return true;
+  }
+  if (t === 'mxc') {
+    const x = market.get(String(m.id)); if (!x || x.uid !== c.uid) { send(c, { t: 'mxcx', ok: 0 }); return true; }
+    market.delete(x.id); mkSave(); send(c, { t: 'mxcx', ok: 1, it: x.it, id: x.id }); return true;
+  }
+  if (t === 'mxm') { mkMine(c); return true; }
+  if (t === 'mxe') { const e = mkEarn.get(c.uid); if (!e || (!e.g && !e.d)) { send(c, { t: 'mxcl', g: 0, d: 0 }); return true; } const g = e.g, d = e.d; e.g = 0; e.d = 0; mkSave(); send(c, { t: 'mxcl', g: g, d: d }); return true; }
+  return false;
+}
 function social(c, m) {
   const t = m.t;
+  if (t.length === 3 && t.indexOf('mx') === 0) return mkHandle(c, m);
   if (t === 'pi' || t === 'pn') {                                 // invite to party (by id or by name)
     let v = null; if (t === 'pi') v = clients.get(m.to | 0); else { const nm = clean(m.name, 20).toLowerCase(); clients.forEach(function (x) { if (x.joined && x.open && x.name.toLowerCase() === nm) v = x; }); }
     if (!v || !v.joined || v === c) { say(c, 'Player not found (they must be online).'); return true; }
@@ -227,19 +288,30 @@ function onMessage(c, txt) {
   if (m.t === 'p') { send(c, { t: 'p', ts: m.ts, n: c.joined ? inRoom(c.room).length : clients.size }); return; }
   if ((m.t === 'join' && !c.joined) || (m.t === 'map' && c.joined)) {   // join a map room (or switch rooms when the player travels)
     const room = roomOf(m), was = c.joined ? c.room : null;
-    if (was === room) { if (c.joined) send(c, { t: 'w', v: 4, dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top() }); return; }   // same map reloaded: resend who is here
+    if (was === room) { if (c.joined) send(c, { t: 'w', v: 6, loot: lootList(room), dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top(room) }); return; }   // same map reloaded: resend who is here
     if (inRoom(room).filter(function (x) { return x !== c; }).length >= MAX_PLAYERS) { send(c, { t: 'full' }); if (!c.joined) c.sock.end(); return; }
     if (was !== null) broadcast({ t: 'l', id: c.id }, c, was);
     c.room = room;
     c.name = String(m.name || c.name || 'Player').replace(/[^A-Za-z0-9]/g, '').slice(0, 14) || ('Player' + c.id); c.lvl = num(m.lvl, 1, 150, 1) | 0;
     if (m.uid) c.uid = String(m.uid).replace(/[^A-Za-z0-9_\-]/g, '').slice(0, 64);
     c.look = small(m.look); c.eq = small(m.eq); c.cw = small(m.cw); c.mh = num(m.mh, 1, 1e9, 100); c.hp = c.mh;
-    const a = Math.random() * Math.PI * 2, r = room === PVP_ROOM ? 14 + Math.random() * 38 : 4 + Math.random() * 10; c.x = Math.cos(a) * r; c.z = Math.sin(a) * r; c.joined = true;
-    send(c, { t: 'w', v: 4, dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top() });
+    const a = Math.random() * Math.PI * 2, r = isArena(room) ? 14 + Math.random() * 38 : 4 + Math.random() * 10; c.x = Math.cos(a) * r; c.z = Math.sin(a) * r; c.joined = true;
+    send(c, { t: 'w', v: 6, loot: lootList(room), dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top(room) });
     broadcast({ t: 'j', p: pub(c) }, c, room);
     try { socialJoined(c, was === null); } catch (e) {} return;
   }
   if (!c.joined) return;
+  if (m.t === 'ld') {                                             // a dead player drops an item
+    if (!c.joined || c.room.indexOf('x_') === 0 || !rate(c.ldr || (c.ldr = []), 0.5)) return;
+    const it = lootItem(m.it); if (!it) return; const lid = 'L' + (++lootSeq);
+    const l = { lid: lid, it: it, x: num(m.x, -lim(c), lim(c), 0), z: num(m.z, -lim(c), lim(c), 0), at: Date.now() };
+    if (!roomLoot.has(c.room)) roomLoot.set(c.room, new Map()); roomLoot.get(c.room).set(lid, l);
+    broadcast({ t: 'ld', l: { lid: lid, it: it, x: l.x, z: l.z } }, undefined, c.room); return;
+  }
+  if (m.t === 'lp') {                                             // pick up: first request wins
+    const rl = roomLoot.get(c.room), l = rl && rl.get(String(m.lid)); if (!l || !c.joined || !rate(c.lpr || (c.lpr = []), 5)) return;
+    rl.delete(l.lid); send(c, { t: 'lg', it: l.it }); broadcast({ t: 'lx', lid: l.lid }, undefined, c.room); return;
+  }
   if (m.t === 'mk') { if (c.room.indexOf('x_') === 0 || !rate(c.mkr || (c.mkr = []), 30)) return; const id = String(m.s || '').replace(/[^A-Za-z0-9_#]/g, '').slice(0, 40), rt = num(m.rt, 1, 900, 8); if (!id) return; let d = roomDead.get(c.room); if (!d) roomDead.set(c.room, d = new Map()); d.set(id, Date.now() + rt * 1000); broadcast({ t: 'mk', s: id, rt: rt }, c, c.room); return; }
   try { if (social(c, m)) return; } catch (e) { console.log('social error', e); }
   if (m.t === 's') {
@@ -259,9 +331,9 @@ function onMessage(c, txt) {
   } else if (m.t === 'k') {                                       // victim reports its own death
     if (c.deadAt && Date.now() - c.deadAt < 3000) return; c.deadAt = Date.now(); c.deaths++;
     const k = clients.get(m.by | 0); if (k && k !== c && k.joined) k.kills++;
-    broadcast({ t: 'k', killer: k ? k.id : 0, kn: k ? k.name : '', victim: c.id, vn: c.name, top: top() }, undefined, c.room);
+    broadcast({ t: 'k', killer: k ? k.id : 0, kn: k ? k.name : '', victim: c.id, vn: c.name, top: top(c.room) }, undefined, c.room);
   }
 }
 setInterval(function () { const now = Date.now(); clients.forEach(function (c) { if (now - c.last > IDLE_MS) { try { c.sock.destroy(); } catch (e) {} drop(c); } }); }, 10000);
-setInterval(function () { if (clients.size) broadcast({ t: 'top', top: top(), n: inRoom(PVP_ROOM).length }, undefined, PVP_ROOM); }, 5000);
+setInterval(function () { if (clients.size) ['pvp', 'pvp2', 'pvp3', 'pvp4', 'pvp5'].forEach(function (r) { if (inRoom(r).length) broadcast({ t: 'top', top: top(r), n: inRoom(r).length }, undefined, r); }); }, 5000);
 server.listen(PORT, function () { console.log('RanCraft PvP server listening on port ' + PORT); });
