@@ -1,0 +1,11 @@
+# Render Blueprint: Singapore is Render's closest region to the Philippines (Render has no Hong Kong region).
+# An existing service cannot change region - create a NEW web service (or use this blueprint) and put its wss:// address in Settings > Game server.
+services:
+  - type: web
+    name: rancraft-pvp
+    runtime: node
+    region: singapore
+    plan: free
+    buildCommand: echo ok
+    startCommand: node server.js
+    healthCheckPath: /
