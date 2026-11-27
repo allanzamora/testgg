@@ -76,7 +76,8 @@ const PARTY_MAX = 5, GUILD_MAX = 30, GFILE = path.join(process.env.DATA_DIR || _
 const parties = new Map(); let nextParty = 1;
 const guilds = new Map(), userGuild = new Map(); let nextGuild = 1;
 try { const j = JSON.parse(fs.readFileSync(GFILE, 'utf8')); (j.guilds || []).forEach(function (g) { g.members = new Map(Object.entries(g.members || {})); guilds.set(g.id, g); g.members.forEach(function (m, u) { userGuild.set(u, g.id); }); nextGuild = Math.max(nextGuild, g.id + 1); }); } catch (e) {}
-
+/* ---- persistence: Firebase Realtime Database (REST) + local file fallback ----
+   env FIREBASE_DB_URL (default = the game's database), FIREBASE_SECRET (database secret, needed if your rules are not public for /moviex_guilds) */
 const FB_URL = String(process.env.FIREBASE_DB_URL || 'https://html-codes-encrytper.firebaseio.com').replace(/\/+$/, ''), FB_SECRET = process.env.FIREBASE_SECRET || 'c7zcqlxVa6dsEJldwExNgR9T0hWZIhBvlKNZxxh2', FB_PATH = '/moviex_guilds.json';
 let fbLoaded = false, saveTimer = null, fbDirty = false;
 function fbReq(method, body, cb, pth) {
@@ -288,7 +289,7 @@ function onMessage(c, txt) {
   if (m.t === 'p') { send(c, { t: 'p', ts: m.ts, n: c.joined ? inRoom(c.room).length : clients.size }); return; }
   if ((m.t === 'join' && !c.joined) || (m.t === 'map' && c.joined)) {   // join a map room (or switch rooms when the player travels)
     const room = roomOf(m), was = c.joined ? c.room : null;
-    if (was === room) { if (c.joined) send(c, { t: 'w', v: 6, loot: lootList(room), dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top(room) }); return; }   // same map reloaded: resend who is here
+    if (was === room) { if (c.joined) send(c, { t: 'w', v: 7, loot: lootList(room), dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top(room) }); return; }   // same map reloaded: resend who is here
     if (inRoom(room).filter(function (x) { return x !== c; }).length >= MAX_PLAYERS) { send(c, { t: 'full' }); if (!c.joined) c.sock.end(); return; }
     if (was !== null) broadcast({ t: 'l', id: c.id }, c, was);
     c.room = room;
@@ -296,7 +297,7 @@ function onMessage(c, txt) {
     if (m.uid) c.uid = String(m.uid).replace(/[^A-Za-z0-9_\-]/g, '').slice(0, 64);
     c.look = small(m.look); c.eq = small(m.eq); c.cw = small(m.cw); c.mh = num(m.mh, 1, 1e9, 100); c.hp = c.mh;
     const a = Math.random() * Math.PI * 2, r = isArena(room) ? 14 + Math.random() * 38 : 4 + Math.random() * 10; c.x = Math.cos(a) * r; c.z = Math.sin(a) * r; c.joined = true;
-    send(c, { t: 'w', v: 6, loot: lootList(room), dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top(room) });
+    send(c, { t: 'w', v: 7, loot: lootList(room), dead: deadList(room), id: c.id, x: c.x, z: c.z, players: inRoom(room).filter(function (x) { return x !== c; }).map(pub), top: top(room) });
     broadcast({ t: 'j', p: pub(c) }, c, room);
     try { socialJoined(c, was === null); } catch (e) {} return;
   }
@@ -311,6 +312,11 @@ function onMessage(c, txt) {
   if (m.t === 'lp') {                                             // pick up: first request wins
     const rl = roomLoot.get(c.room), l = rl && rl.get(String(m.lid)); if (!l || !c.joined || !rate(c.lpr || (c.lpr = []), 5)) return;
     rl.delete(l.lid); send(c, { t: 'lg', it: l.it }); broadcast({ t: 'lx', lid: l.lid }, undefined, c.room); return;
+  }
+  if (m.t === 'dq' || m.t === 'da' || m.t === 'dn' || m.t === 'dx') {          // duel messages: relayed to the other player in the same room
+    if (!c.joined || c.room.indexOf('x_') === 0 || !rate(c.dur || (c.dur = []), 6)) return;
+    const o = clients.get(m.to | 0); if (!o || !o.joined || o.room !== c.room || o === c) return;
+    send(o, { t: m.t, from: c.id, fn: c.name, cx: +m.cx || 0, cz: +m.cz || 0, r: m.r === 'lost' ? 'lost' : 'draw' }); return;
   }
   if (m.t === 'mk') { if (c.room.indexOf('x_') === 0 || !rate(c.mkr || (c.mkr = []), 30)) return; const id = String(m.s || '').replace(/[^A-Za-z0-9_#]/g, '').slice(0, 40), rt = num(m.rt, 1, 900, 8); if (!id) return; let d = roomDead.get(c.room); if (!d) roomDead.set(c.room, d = new Map()); d.set(id, Date.now() + rt * 1000); broadcast({ t: 'mk', s: id, rt: rt }, c, c.room); return; }
   try { if (social(c, m)) return; } catch (e) { console.log('social error', e); }
